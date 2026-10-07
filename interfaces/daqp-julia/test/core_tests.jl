@@ -332,6 +332,28 @@ end
     @test info3.iterations == info1.iterations
 end
 
+@testset "BnB cutoff" begin
+    # f = 0, so that fval_bound refers to the objective 0.5x'Hx itself. At
+    # least two of the four binary variables are one, so the optimal value is 1
+    H = Matrix(1.0I, 4, 4); f = zeros(4); A = ones(1, 4)
+    sense = vcat(fill(Cint(DAQPBase.BINARY), 4), Cint[0])
+    bu = [1.0, 1, 1, 1, 1e30]; bl = [0.0, 0, 0, 0, 1.5]
+    for (bound, flag) in ((1e30, DAQPBase.OPTIMAL), (1.1, DAQPBase.OPTIMAL), (0.9, DAQPBase.CUTOFF))
+        s = settings(DAQPBase.Model(), Dict(:fval_bound => bound))
+        _, fval, exitflag, info = quadprog(H, f, A, bu, bl, sense; settings=s)
+        @test exitflag == flag
+        flag == DAQPBase.OPTIMAL && @test abs(fval - 1) < 1e-9
+        flag == DAQPBase.CUTOFF && @test info.status == :Cutoff
+    end
+    # Without an integer-feasible solution, the problem remains infeasible
+    bu[end] = 0.8; bl[end] = 0.2
+    for bound in (1e30, 10.0)
+        s = settings(DAQPBase.Model(), Dict(:fval_bound => bound))
+        _, _, exitflag, _ = quadprog(H, f, A, bu, bl, sense; settings=s)
+        @test exitflag == DAQPBase.INFEASIBLE
+    end
+end
+
 @testset "Model interface" begin
     # Setup model and solve problem
     d = DAQPBase.Model()
@@ -815,8 +837,28 @@ end
     but = vcat(ones(nbt), fill(2.0, nt - nbt), center + width)
     blt = vcat(zeros(nbt), fill(-2.0, nt - nbt), center - width)
     st = vcat(fill(Cint(DAQPBase.BINARY), nbt), zeros(Cint, nt - nbt + mt))
+    _, fopt, exitflag, _ = quadprog(Ht, ft, At, but, blt, st)
+    @test exitflag == DAQPBase.OPTIMAL
     s = settings(DAQPBase.Model(), Dict(:time_limit => 1e-9))
-    _, _, exitflag, info = quadprog(Ht, ft, At, but, blt, st; settings=s)
+    x, fval, exitflag, info = quadprog(Ht, ft, At, but, blt, st; settings=s)
+    # An integer-feasible solution has been found before the limit, and the
+    # best one is returned
+    @test exitflag == DAQPBase.TIMELIMIT_FEASIBLE
+    @test info.status == :Time_Limit_Feasible
+    @test info.nodes <= 32
+    @test all(min.(abs.(x[1:nbt]), abs.(x[1:nbt] .- 1)) .< 1e-6)
+    @test all(blt[1:nt] .- 1e-6 .<= x .<= but[1:nt] .+ 1e-6)
+    @test all(blt[nt+1:end] .- 1e-6 .<= At * x .<= but[nt+1:end] .+ 1e-6)
+    @test abs(fval - (0.5 * dot(x, Ht, x) + dot(ft, x))) < 1e-6
+    @test fval >= fopt - 1e-6
+
+    # Without an integer-feasible solution at the limit, TIMELIMIT is returned
+    # (every binary variable is fractional at the root, and the first leaf of
+    # the tree is at depth nn)
+    nn = 40
+    _, _, exitflag, info = quadprog(Matrix(1.0I, nn, nn), fill(-0.5, nn), ones(1, nn),
+        vcat(ones(nn), 0.4nn), vcat(zeros(nn), -1e30),
+        vcat(fill(Cint(DAQPBase.BINARY), nn), Cint[0]); settings=s)
     @test exitflag == DAQPBase.TIMELIMIT
     @test info.nodes <= 32
 end

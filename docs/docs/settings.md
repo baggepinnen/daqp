@@ -35,13 +35,14 @@ Table of contents
 | `abs_subopt` | Allowed absolute suboptimality in branch and bound | 0 |
 | `sing_tol` | Tolerance for checking if the LDL' factorization is singular| 3.7e-11 |
 | `refactor_tol` | Tolerance for refactoring the LDL' factorization before terminating | 1e-9 |
-| `time_limit` | Maximum wall-clock time in seconds before terminating (0 means no limit) | 0 |
+| `time_limit` | Maximum wall-clock time in seconds before terminating (0 means no limit). If branch and bound reaches it after an integer-feasible solution has been found, the best such solution is returned (exit flag 5). | 0 |
 
 
 ## Exit flags 
 
 |Value|Status |
 |:-:|:-------|
+|5|Time limit reached, best integer-feasible solution returned (branch and bound)|
 |4|Optimal (inexact)|
 |2|Soft optimal|
 |1|Optimal |
@@ -53,6 +54,7 @@ Table of contents
 |-6|Initial working set overdetermined|
 |-7|Time limit reached|
 |-8|Unsupported problem|
+|-9|No integer-feasible solution with an objective below `fval_bound` (branch and bound)|
 
 ## Constraint classification
 The type of a constraint is classified through an integer value (called sense), where the bits in this integer encode different properties: 
