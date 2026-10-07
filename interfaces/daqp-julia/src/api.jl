@@ -463,12 +463,23 @@ function codegen(d::DAQPBase.Model; fname="daqp_workspace", dir="codegen", prefi
             push!(hfiles,"hierarchical.h")
         end
 
-        # Copy source files from GitHub
-        for f in cfiles
-            Downloads.download("https://raw.githubusercontent.com/darnstrom/daqp/master/src/"*f, dir*f)
-        end
-        for f in hfiles
-            Downloads.download("https://raw.githubusercontent.com/darnstrom/daqp/master/include/"*f, dir*f)
+        # The sources of the library that rendered the workspace, if its DAQP_jll artifact ships them
+        # (share/daqp/src, as the builds of the fork baggepinnen/daqp do); otherwise from GitHub
+        art_src = joinpath(DAQP_jll.artifact_dir, "share", "daqp", "src")
+        art_inc = joinpath(DAQP_jll.artifact_dir, "include", "daqp")
+        if startswith(DAQP_jll.libdaqp, DAQP_jll.artifact_dir) &&
+                all(f -> isfile(joinpath(art_src, f)), cfiles) && all(f -> isfile(joinpath(art_inc, f)), hfiles)
+            for (from, files) in ((art_src, cfiles), (art_inc, hfiles)), f in files
+                cp(joinpath(from, f), dir*f; force = true)
+                chmod(dir*f, 0o644) # the artifact is read-only
+            end
+        else
+            for f in cfiles
+                Downloads.download("https://raw.githubusercontent.com/darnstrom/daqp/master/src/"*f, dir*f)
+            end
+            for f in hfiles
+                Downloads.download("https://raw.githubusercontent.com/darnstrom/daqp/master/include/"*f, dir*f)
+            end
         end
     end
 end
