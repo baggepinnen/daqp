@@ -18,6 +18,34 @@ c_float daqp_dot(const c_float* v1, const c_float* v2, const int n) {
     return daqp_dot_inline(v1, v2, n);
 }
 
+// For a reduced problem in sparse form: G*a' for the sparse row a of
+// constraint id, times scale (a row of G if a has a single nonzero)
+static const c_float* sparse_gram_row(DAQPSparseA *s, const int id, c_float *scale){
+    const int start = s->row_ptr[id], end = s->row_ptr[id+1];
+    const int nW = s->nW;
+    int j, k;
+    if(end-start == 1){
+        *scale = s->val[start];
+        return s->G+(size_t)s->col[start]*nW;
+    }
+    for(j = 0; j < nW; j++) s->g[j] = 0;
+    for(k = start; k < end; k++){
+        const c_float v = s->val[k];
+        const c_float *Gk = s->G+(size_t)s->col[k]*nW;
+        for(j = 0; j < nW; j++) s->g[j] += v*Gk[j];
+    }
+    *scale = 1;
+    return s->g;
+}
+
+// a*g for the sparse row a of constraint id
+static c_float sparse_dot(const DAQPSparseA *s, const int id, const c_float *g){
+    c_float sum = 0;
+    int k;
+    for(k = s->row_ptr[id]; k < s->row_ptr[id+1]; k++) sum += s->val[k]*g[s->col[k]];
+    return sum;
+}
+
 void daqp_update_LDL_add(DAQPWorkspace *work, const int add_ind, const c_float rho){
     work->sing_ind = DAQP_EMPTY_IND;
     int i,j,disp,id;
@@ -26,10 +54,19 @@ void daqp_update_LDL_add(DAQPWorkspace *work, const int add_ind, const c_float r
     int ns_active=0;
     c_float sum;
     c_float *Mi, *Mk;
+    // Products of the rows of M from the sparse rows and G (reduced problem)
+    const c_float *g = NULL;
+    c_float gscale = 1;
+    if(work->spA != NULL && work->spA->G != NULL && work->ms == 0)
+        g = sparse_gram_row(work->spA,add_ind,&gscale);
 
     // di <-- Mi' Mi
     // If normalized this will always be 1...
-    if(add_ind < work->ms){
+    if(g != NULL){
+        Mi = NULL;
+        start_col = 0;
+    }
+    else if(add_ind < work->ms){
         Mi = (work->Rinv)? work->Rinv+DAQP_R_OFFSET(add_ind,work->n): NULL;
         start_col = add_ind;
     }
@@ -37,7 +74,8 @@ void daqp_update_LDL_add(DAQPWorkspace *work, const int add_ind, const c_float r
         Mi = work->M+work->n*(add_ind-work->ms);
         start_col = 0;
     }
-    if(Mi==NULL) sum = 1;
+    if(g != NULL) sum = gscale*sparse_dot(work->spA,add_ind,g);
+    else if(Mi==NULL) sum = 1;
     else
         sum = dot_row(Mi+start_col,Mi+start_col,work->n-start_col);
 
@@ -60,6 +98,10 @@ void daqp_update_LDL_add(DAQPWorkspace *work, const int add_ind, const c_float r
     for(i=0;i<work->n_active;i++){
         id = work->WS[i];
         if(DAQP_IS_SOFT(id) && DAQP_IS_SLACK_FREE(id)) ns_active++;
+        if(g != NULL){
+            work->L[new_L_start+i] = gscale*sparse_dot(work->spA,id,g);
+            continue;
+        }
         // Use Rinv or M for Mk depending on if k is simple bound or not 
         if(id < work->ms){ 
             Mk = (work->Rinv) ? work->Rinv+DAQP_R_OFFSET(id,work->n): NULL;

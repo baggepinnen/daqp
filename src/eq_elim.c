@@ -454,6 +454,7 @@ static void eq_free_reduced_ldp(DAQPEqElim* eq){
     free(d->M); free(d->dupper); free(d->dlower); free(d->scaling); free(d->Mu);
     free(d->sense); free(d->Rinv); free(d->RinvD); free(d->v);
     free(d->bin_ids);
+    daqp_free_sparse_A(&d->spA);
     memset(d,0,sizeof(DAQPLDPData));
     free(eq->rho_r);
     eq->rho_r = NULL;
@@ -1094,6 +1095,7 @@ static void eq_swap_ldp(DAQPWorkspace* work, DAQPLDPData* d){
     DAQP_SWAP(c_float*,work->w_us,d->w_us);
     DAQP_SWAP(int,work->state,d->state);
     DAQP_SWAP(int,work->n_prox,d->n_prox);
+    DAQP_SWAP(DAQPSparseA*,work->spA,d->spA);
     if(work->bnb != NULL){
         DAQP_SWAP(int*,work->bnb->bin_ids,d->bin_ids);
         DAQP_SWAP(int,work->bnb->nb,d->nb);
@@ -1147,6 +1149,69 @@ void daqp_eq_deactivate(DAQPWorkspace* work){
     if(work->bnb != NULL) work->bnb->n_root_WS = 0;
 }
 
+/*
+ * The reduced constraints of PATH_LDP in sparse form, as the kept rows A_K of
+ * [I; A] in the original variables, scaled as the rows of M. With the identity
+ * Hessian of the reduced problem M = A_K W, so that M*u = A_K*(W*u) reads W and
+ * the nonzeros of A instead of all of M. Called while the reduced problem is
+ * installed; formed only if a product reads less memory than one with M.
+ * Setting the environment variable DAQP_SPARSE_A to 0 disables it.
+ */
+static void eq_update_sparse_A(DAQPWorkspace* work, const DAQPProblem* qp){
+    DAQPEqElim* eq = work->eq;
+    const int n = eq->n, ms = eq->ms, mr = eq->mr, nz = eq->nz;
+    const char *env = getenv("DAQP_SPARSE_A");
+    DAQPSparseA* s;
+    size_t nnz = 0;
+    int c, i, j;
+    daqp_free_sparse_A(&work->spA);
+    if(eq->path != DAQP_EQ_PATH_LDP || work->Rinv != NULL || work->Mu == NULL ||
+            work->avi != NULL || work->n_prox > 0 || mr <= 0 || nz <= 0) return;
+    if(env != NULL && env[0] == '0') return;
+    if(work->RinvD != NULL) // M = A_r diag(RinvD), which is A_r for the identity
+        for(j = 0; j < nz; j++) if(work->RinvD[j] != 1) return;
+    for(c = 0; c < mr; c++){
+        const int id = eq->keep[c];
+        if(id < ms){ nnz++; continue; }
+        const c_float* a = qp->A+(size_t)(id-ms)*n;
+        for(j = 0; j < n; j++) if(a[j] != 0) nnz++;
+    }
+    if(3*nnz/2 + (size_t)n*nz >= (size_t)mr*nz) return;
+    s = daqp_allocate_sparse_A(mr,nnz,n);
+    for(c = 0, nnz = 0; c < mr; c++){
+        const int id = eq->keep[c];
+        const c_float scaling_c = work->scaling[c];
+        s->row_ptr[c] = (int)nnz;
+        if(id < ms){
+            s->col[nnz] = id;
+            s->val[nnz++] = scaling_c;
+            continue;
+        }
+        const c_float* a = qp->A+(size_t)(id-ms)*n;
+        for(j = 0; j < n; j++){
+            if(a[j] == 0) continue;
+            s->col[nnz] = j;
+            s->val[nnz++] = a[j]*scaling_c;
+        }
+    }
+    s->row_ptr[mr] = (int)nnz;
+    s->W = eq->W;
+    s->nW = n;
+    // G = W*W', for the products of the rows of M in the updates of the LDL
+    // factorization and for W*u (see daqp_compute_primal_and_fval)
+    s->G = malloc((size_t)n*n*sizeof(c_float));
+    s->g = malloc(n*sizeof(c_float));
+    s->gu = malloc(n*sizeof(c_float));
+    s->ws_u = malloc((mr+1)*sizeof(int));
+    s->lam_u = malloc((mr+1)*sizeof(c_float));
+    for(i = 0; i < n; i++){
+        const c_float* Wi = eq->W+(size_t)i*nz;
+        for(j = 0; j <= i; j++)
+            s->G[(size_t)i*n+j] = s->G[(size_t)j*n+i] = eq_dot(Wi,eq->W+(size_t)j*nz,nz);
+    }
+    work->spA = s;
+}
+
 /* ---------------------------------------------------------------------------
  * Updating
  * -------------------------------------------------------------------------*/
@@ -1197,6 +1262,7 @@ int daqp_eq_update(DAQPWorkspace* work, DAQPProblem* qp, int mask,
 
     daqp_eq_install(work);
     flag = update_ldp(mask_r,work,&eq->qp);
+    if(flag >= 0 && (mask_r&DAQP_UPDATE_M)) eq_update_sparse_A(work,qp);
     // A singular reduced Hessian needs v for the proximal linear term (as in
     // setup_daqp_ldp)
     if(flag >= 0 && work->n_prox > 0 && work->v == NULL && work->qp->H != NULL)

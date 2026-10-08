@@ -186,4 +186,7 @@ struct Workspace
     w_us::Ptr{Cdouble}
 
     state::Cint
+
+    # The general constraints in sparse form (NULL if M*u is formed from M)
+    spA::Ptr{Cvoid}
 end
