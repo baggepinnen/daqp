@@ -4,6 +4,7 @@
 #include <math.h>
 #include <float.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifndef DAQP_AVI_PIVOT_TRIGGER
 #define DAQP_AVI_PIVOT_TRIGGER ((c_float)0.05)
@@ -611,6 +612,79 @@ static void daqp_rinv_product_block(const c_float* Rinv, const c_float** a,
     }
 }
 
+// Sparse rows with nnz nonzeros, and y of length ny
+DAQPSparseA* daqp_allocate_sparse_A(const int rows, const size_t nnz, const int ny){
+    DAQPSparseA *s = malloc(sizeof(DAQPSparseA));
+    s->nnz = (int)nnz;
+    s->row_ptr = malloc((rows+1)*sizeof(int));
+    s->col = malloc((nnz > 0 ? nnz : 1)*sizeof(int));
+    s->val = malloc((nnz > 0 ? nnz : 1)*sizeof(c_float));
+    s->y = malloc((ny > 0 ? ny : 1)*sizeof(c_float));
+    s->W = NULL;
+    s->nW = 0;
+    s->G = NULL;
+    s->g = NULL;
+    s->gu = NULL;
+    s->ws_u = NULL;
+    s->lam_u = NULL;
+    s->n_u = 0;
+    s->u_valid = 1;
+    s->y_valid = 0;
+    return s;
+}
+
+void daqp_free_sparse_A(DAQPSparseA **spA){
+    if(*spA == NULL) return;
+    free((*spA)->row_ptr);
+    free((*spA)->col);
+    free((*spA)->val);
+    free((*spA)->y);
+    free((*spA)->G);
+    free((*spA)->g);
+    free((*spA)->gu);
+    free((*spA)->ws_u);
+    free((*spA)->lam_u);
+    free(*spA);
+    *spA = NULL;
+}
+
+/*
+ * The general constraints of A in compressed rows, scaled as the rows of M (so
+ * daqp_normalize_M must have formed scaling). Formed only if a product with
+ * them, which also forms all of R^{-1}*u, reads less memory than one with M.
+ * Setting the environment variable DAQP_SPARSE_A to 0 disables it.
+ */
+static void daqp_update_sparse_A(DAQPWorkspace *work, const c_float *A){
+    int i, j;
+    size_t nnz = 0;
+    const int n = work->n;
+    const int mA = work->m-work->ms;
+    const char *env = getenv("DAQP_SPARSE_A");
+    DAQPSparseA *s;
+    daqp_free_sparse_A(&work->spA);
+    if(work->Rinv == NULL || work->Mu == NULL || mA <= 0 || A == NULL) return;
+    if(env != NULL && env[0] == '0') return;
+    for(i = 0; i < mA; i++)
+        for(j = 0; j < n; j++)
+            if(A[(size_t)i*n+j] != 0) nnz++;
+    // A nonzero is stored with its column index, at about 3/2 the size of an entry of M
+    if(3*nnz/2 + (size_t)n*(n+1)/2 >= (size_t)mA*n) return;
+    s = daqp_allocate_sparse_A(mA,nnz,n);
+    for(i = 0, nnz = 0; i < mA; i++){
+        const c_float scaling_i = work->scaling[work->ms+i];
+        s->row_ptr[i] = (int)nnz;
+        for(j = 0; j < n; j++){
+            const c_float a = A[(size_t)i*n+j];
+            if(a == 0) continue;
+            s->col[nnz] = j;
+            s->val[nnz] = a*scaling_i;
+            nnz++;
+        }
+    }
+    s->row_ptr[mA] = (int)nnz;
+    work->spA = s;
+}
+
 int daqp_update_M(DAQPWorkspace *work, c_float *A){
     int i,j,k,disp;
     const int n = work->n;
@@ -653,7 +727,13 @@ int daqp_update_M(DAQPWorkspace *work, c_float *A){
     }
 
     reset_daqp_workspace(work); // Internal factorizations need to be redone!
-    return daqp_normalize_M(work);
+    const int error_flag = daqp_normalize_M(work);
+    if(error_flag < 0){
+        daqp_free_sparse_A(&work->spA);
+        return error_flag;
+    }
+    daqp_update_sparse_A(work,A);
+    return error_flag;
 }
 
 void daqp_update_v(c_float *f, DAQPWorkspace *work){

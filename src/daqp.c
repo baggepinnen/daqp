@@ -11,6 +11,7 @@ int daqp_ldp(DAQPWorkspace *work){
     c_float best_fval = -1;
     c_float fval_bound = 2*work->settings->fval_bound; // Internal objective is twice the nomninal
     work->state &= ~DAQP_STATE_NOISE_FLOOR;
+    if(work->spA != NULL) work->spA->y_valid = 0;
 
     // Correctly cleanup a singular working-set on entry
     if(work->sing_ind != DAQP_EMPTY_IND && work->sing_ind == work->n_active-1 &&
@@ -148,6 +149,7 @@ cycle_guard:
 #endif
     }
     // Finalize result before returning
+    daqp_ensure_u(work);
     work->iterations = iter;
     return exitflag;
 }

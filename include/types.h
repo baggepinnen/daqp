@@ -133,6 +133,36 @@ typedef struct{
 }DAQPAVI;
 
 /*
+ * The general constraints in compressed sparse rows, scaled as the rows of M,
+ * so that M*u = A*(R^{-1}*u) reads the nonzeros of A and the rows of Rinv
+ * instead of all of M (see daqp_update_sparse_A). For the reduced problem of
+ * an equality elimination, M = A_K W with the kept rows A_K of [I; A] and the
+ * basis W of the reduced variables, and M*u = A_K*(W*u) (see eq_elim.c).
+ */
+typedef struct{
+    int nnz;
+    int *row_ptr; // Start of each row in col and val (m-ms+1)
+    int *col; // Column of each nonzero
+    c_float *val; // Nonzeros
+    c_float *y; // R^{-1}*u (length n), or W*u (length nW)
+    const c_float *W; // W (nW x n, row major) of a reduced problem, else NULL
+    int nW;
+    // For a reduced problem, G = W*W' (nW x nW), so that M_i*M_k' = a_i*G*a_k'
+    // for the sparse rows a_i and a_k, and g (length nW) for G*a_i'
+    c_float *G;
+    c_float *g;
+    // With G, daqp_compute_primal_and_fval forms y = W*u = -G*gu with
+    // gu = sum lam_i a_i' and u only when it is read (daqp_ensure_u), from the
+    // working set and the multipliers it stores (ws_u, lam_u, n_u)
+    c_float *gu;
+    int *ws_u;
+    c_float *lam_u;
+    int n_u;
+    int u_valid; // u = -M'lam for ws_u and lam_u
+    int y_valid; // y = W*u for ws_u and lam_u
+}DAQPSparseA;
+
+/*
  * The parts of the workspace that describe the LDP that is solved. An
  * equality elimination keeps a second set for its reduced problem, which is
  * swapped into the workspace while that problem is formed or solved, so that
@@ -160,6 +190,7 @@ typedef struct{
     int n_prox;
     int *bin_ids; // Binary constraints (if BnB)
     int nb;
+    DAQPSparseA *spA;
 }DAQPLDPData;
 
 /*
@@ -314,6 +345,10 @@ typedef struct{
     c_float *w_us;
 
     int state;
+
+    // The general constraints in sparse form (NULL if M*u is formed from M);
+    // last in the workspace, so that the offsets of the fields above are kept
+    DAQPSparseA *spA;
 }DAQPWorkspace;
 
 #define DAQP_IS_HIERARCHICAL(work) \

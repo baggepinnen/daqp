@@ -311,6 +311,7 @@ void free_daqp_ldp(DAQPWorkspace *work){
         free(work->scaling);
         free(work->M);
         free(work->Mu);
+        daqp_free_sparse_A(&work->spA);
         free(work->dupper);
         free(work->dlower);
     }
@@ -354,6 +355,7 @@ void allocate_daqp_workspace(DAQPWorkspace *work, int n, int ns){
     work->v = NULL;
     work->scaling = NULL;
     work->Mu = NULL;
+    work->spA = NULL;
 
     work->lam = malloc((n+1)*sizeof(c_float));
     work->lam_star = malloc((n+1)*sizeof(c_float));
@@ -388,6 +390,7 @@ void allocate_daqp_workspace(DAQPWorkspace *work, int n, int ns){
     work->avi = NULL;
     work->eq = NULL;
     work->timer = NULL;
+    work->spA = NULL;
 
     reset_daqp_workspace(work);
 }

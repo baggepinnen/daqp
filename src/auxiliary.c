@@ -177,10 +177,73 @@ void daqp_add_constraint(DAQPWorkspace *work, const int add_ind, c_float lam){
     daqp_add_constraint_keep_slack(work,add_ind,lam);
 }
 
+// Whether u is formed lazily (see DAQPSparseA)
+static int daqp_lazy_u(const DAQPWorkspace *work){
+    return work->spA != NULL && work->spA->G != NULL && work->spA->W != NULL &&
+        work->ms == 0 && work->Mu != NULL && work->avi == NULL && work->n_prox == 0;
+}
+
+// Form u = -M'lam for the working set and the multipliers of the latest
+// daqp_compute_primal_and_fval, if it left u out
+void daqp_ensure_u(DAQPWorkspace *work){
+    DAQPSparseA *s = work->spA;
+    int i, j, disp;
+    if(s == NULL || s->u_valid) return;
+    for(j=0;j<work->n;j++)
+        work->u[j]=0;
+    for(i=0;i<s->n_u;i++){
+        const c_float li = s->lam_u[i];
+        for(j=0,disp=work->n*(s->ws_u[i]-work->ms);j<work->n;j++)
+            work->u[j]-=work->M[disp++]*li;
+    }
+    s->u_valid = 1;
+}
+
 void daqp_compute_primal_and_fval(DAQPWorkspace *work){
     int i,j,disp,id;
     c_float fval=0;
     const int has_l1 = DAQP_HAS_L1(work);
+    if(daqp_lazy_u(work)){
+        // y = W*u = -W*W'*gu = -G*gu with gu = sum lam_i a_i', and |u|^2 = -gu'y
+        DAQPSparseA *s = work->spA;
+        const int nW = s->nW;
+        c_float *gu = s->gu, *y = s->y;
+        int k;
+        for(j=0;j<nW;j++) gu[j] = 0;
+        for(i=0;i<work->n_active;i++){
+            id = work->WS[i];
+            const c_float li = work->lam_star[i];
+            s->ws_u[i] = id;
+            s->lam_u[i] = li;
+            for(k = s->row_ptr[id]; k < s->row_ptr[id+1]; k++) gu[s->col[k]] += s->val[k]*li;
+            if(DAQP_IS_SOFT(id)){
+                fval += has_l1 ? daqp_soft_penalty(work,id,li)
+                    : work->settings->rho_soft*li*li;
+                work->sense[id] &= ~DAQP_SLACK_SWITCHED;
+            }
+        }
+        s->n_u = work->n_active;
+        // G is symmetric: only its upper triangle is read
+        for(j=0;j<nW;j++) y[j] = 0;
+        for(i=0;i<nW;i++){
+            const c_float *Gi = s->G+(size_t)i*nW;
+            const c_float gi = gu[i];
+            c_float sum = Gi[i]*gi;
+            for(j=i+1;j<nW;j++){
+                sum += Gi[j]*gu[j];
+                y[j] += Gi[j]*gi;
+            }
+            y[i] += sum;
+        }
+        for(j=0;j<nW;j++){
+            y[j] = -y[j];
+            fval -= gu[j]*y[j];
+        }
+        s->u_valid = 0;
+        s->y_valid = 1;
+        work->fval = fval;
+        return;
+    }
     // Reset u
     for(j=0;j<work->n;j++)
         work->u[j]=0;
@@ -218,6 +281,26 @@ int daqp_add_infeasible(DAQPWorkspace *work){
     c_float Mu,min_cand;
     int isupper=0, add_ind=DAQP_EMPTY_IND;
     const c_float noise = daqp_noise_floor(work); // 0 unless cycling persisted
+    // With the general constraints in sparse form, M*u is formed from all of
+    // Rinv*u (which the simple bounds use), or for a reduced problem from W*u
+    c_float *y = NULL;
+    if(work->spA != NULL && work->Mu != NULL && work->avi == NULL && work->n_prox == 0){
+        const DAQPSparseA *s = work->spA;
+        if(s->W != NULL){ // Reduced problem (no simple bounds): y = W*u
+            y = s->y;
+            if(!s->y_valid){ // Not formed by daqp_compute_primal_and_fval
+                daqp_ensure_u(work);
+                for(j=0;j<s->nW;j++)
+                    y[j] = daqp_dot_inline(s->W+(size_t)j*work->n,work->u,work->n);
+            }
+            work->spA->y_valid = 0;
+        }
+        else if(work->Rinv != NULL){
+            y = s->y;
+            for(j=0, disp=0;j<work->n;disp+=work->n-j,j++)
+                y[j] = daqp_dot_inline(work->Rinv+disp,work->u+j,work->n-j);
+        }
+    }
     // Simple bounds
     for(j=0, disp=0;j<work->ms;j++){
         // Never activate immutable or already active constraints
@@ -227,6 +310,9 @@ int daqp_add_infeasible(DAQPWorkspace *work){
         }
         if(work->Rinv==NULL){// Hessian is identify
             Mu=work->u[j];
+        }
+        else if(y != NULL){
+            Mu = y[j];
         }
         else{
             Mu = daqp_dot_inline(work->Rinv+disp,work->u+j,work->n-j);
@@ -248,7 +334,10 @@ int daqp_add_infeasible(DAQPWorkspace *work){
         }
     }
     /* General two-sided constraints */
-    daqp_compute_Mu(work);
+    if(y != NULL)
+        daqp_compute_Mu_sparse(work);
+    else
+        daqp_compute_Mu(work);
     for(j=work->ms, disp=0;j<work->m;j++){
         // Never activate immutable or already active constraints
         if(work->sense[j]&(DAQP_ACTIVE+DAQP_IMMUTABLE)){
@@ -275,8 +364,11 @@ int daqp_add_infeasible(DAQPWorkspace *work){
             }
         }
     }
-    // No constraint is infeasible => return
-    if(add_ind == DAQP_EMPTY_IND) return 0;
+    // No constraint is infeasible => return (with u, which the solution is formed from)
+    if(add_ind == DAQP_EMPTY_IND){
+        daqp_ensure_u(work);
+        return 0;
+    }
     // Otherwise add infeasible constraint to working set
     if(isupper)
         DAQP_SET_UPPER(add_ind);
@@ -347,6 +439,25 @@ void daqp_compute_Mu(DAQPWorkspace *work){
     }
     for(; row<rows; row++)
         work->Mu[row] = daqp_dot_inline(work->M+row*n,work->u,n);
+}
+
+// M*u = A*(R^{-1}*u) from the general constraints in sparse form, given
+// y = Rinv*u from daqp_add_infeasible (overwritten by R^{-1}*u), or for a
+// reduced problem M*u = A_K*(W*u) given y = W*u
+void daqp_compute_Mu_sparse(DAQPWorkspace *work){
+    const DAQPSparseA *s = work->spA;
+    c_float *y = s->y;
+    const int rows = work->m-work->ms;
+    int i, k;
+    // The rows of Rinv of the simple bounds are normalized
+    if(s->W == NULL && (work->state & DAQP_STATE_RINV_NORMALIZED))
+        for(k = 0; k < work->ms; k++) y[k] /= work->scaling[k];
+    for(i = 0; i < rows; i++){
+        c_float sum = 0;
+        for(k = s->row_ptr[i]; k < s->row_ptr[i+1]; k++)
+            sum += s->val[k]*y[s->col[k]];
+        work->Mu[i] = sum;
+    }
 }
 // Lower bound sum rho*p_i^2 (free soft slacks) on the dual curvature along the
 // singular direction p = lam_star; zero if the slacks only carry rounding
@@ -734,6 +845,8 @@ void daqp_sub_working_set_rows(DAQPWorkspace *work, const c_float* dlam, c_float
 void daqp_refine_active(DAQPWorkspace *work){
     int i, j, disp, id;
     c_float Mu, d;
+    daqp_ensure_u(work);
+    if(work->spA != NULL) work->spA->y_valid = 0; // u is changed below
 
     // Refinement uses xldl and zldl as scratch, invalidating the cached CSP
     // forward substitution independently of whether the active set changes.

@@ -12,6 +12,8 @@ int daqp_update_ldp(const int mask, DAQPWorkspace *work, DAQPProblem *qp);
 int daqp_update_Rinv(DAQPWorkspace *work, c_float *H, int is_factored);
 c_float daqp_get_proximal_regularization(const DAQPWorkspace *work);
 int daqp_update_M(DAQPWorkspace *work, c_float *A);
+DAQPSparseA* daqp_allocate_sparse_A(const int rows, const size_t nnz, const int ny);
+void daqp_free_sparse_A(DAQPSparseA **spA);
 void daqp_update_v(c_float *f, DAQPWorkspace *work);
 int daqp_update_d(DAQPWorkspace *work, c_float *bupper, c_float *blower);
 int daqp_check_bounds(DAQPWorkspace* work, c_float* bupper, c_float* blower);
