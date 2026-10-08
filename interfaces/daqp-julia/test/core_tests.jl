@@ -246,75 +246,6 @@ end
 
 end
 
-@testset "Objective in the scale of fval_bound" begin
-    # A mixed-integer QP with a nonzero linear term: the first nbf variables
-    # are binary, sum(x[1:nbf]) <= 2.6 makes branching necessary, and two
-    # equality constraints allow equality reduction
-    nf, nbf = 12, 6
-    Hf = Matrix(1.0I, nf, nf) .+ 0.3
-    ff = -Hf * [fill(0.5, nbf); fill(0.2, nf - nbf)]
-    Af = zeros(3, nf); Af[1, 1:nbf] .= 1
-    Af[2, 7] = 1; Af[2, 8] = -1; Af[3, 9] = 1; Af[3, 10] = 1
-    buf = [ones(nbf); fill(2.0, nf - nbf); 2.6; 0; 0.1]
-    blf = [zeros(nbf); fill(-2.0, nf - nbf); -1e30; 0; 0.1]
-    sbin = Cint[fill(DAQPBase.BINARY, nbf); zeros(Cint, nf - nbf); 0; DAQPBase.EQUALITY; DAQPBase.EQUALITY]
-    sqp = Cint[zeros(Cint, nf + 1); DAQPBase.EQUALITY; DAQPBase.EQUALITY]
-    c = 0.5 * dot(ff, Hf \ ff)
-    off, on = DAQPBase.DAQP_EQ_REDUCTION_OFF, DAQPBase.DAQP_EQ_REDUCTION_ON
-    # Branch and bound reports a cutoff by fval_bound as infeasible, or with
-    # its own exit flag if there is one
-    cutoff_flag = isdefined(DAQPBase, :CUTOFF) ? DAQPBase.CUTOFF : DAQPBase.INFEASIBLE
-    function solve_with(sense, opts; bu = buf)
-        d = DAQPBase.Model()
-        DAQPBase.settings(d, opts)
-        DAQPBase.setup(d, Hf, ff, Af, bu, blf, sense)
-        DAQPBase.settings(d, opts)
-        return DAQPBase.solve(d)
-    end
-    for (sense, flag_below) in ((sbin, cutoff_flag), (sqp, DAQPBase.INFEASIBLE))
-        fval_ldps = Float64[]
-        for eq_reduction in (off, on)
-            opts = Dict{Symbol,Any}(:eq_reduction => Cint(eq_reduction))
-            x, fval, exitflag, info = solve_with(sense, opts)
-            @test exitflag == DAQPBase.OPTIMAL
-            push!(fval_ldps, info.fval_ldp)
-            # Without equality reduction, the offset is 0.5 f'H^-1 f
-            eq_reduction == off && @test abs(info.fval_ldp - (fval + c)) < 1e-9 * (1 + c)
-            δ = 1e-6 * (1 + abs(info.fval_ldp))
-            # A cutoff just above the optimal value keeps the solution
-            opts[:fval_bound] = info.fval_ldp + δ
-            x2, _, exitflag2, _ = solve_with(sense, opts)
-            @test exitflag2 == DAQPBase.OPTIMAL
-            @test norm(x2 - x) < 1e-8
-            # A cutoff just below the optimal value removes it
-            opts[:fval_bound] = info.fval_ldp - δ
-            _, _, exitflag3, _ = solve_with(sense, opts)
-            @test exitflag3 == flag_below
-        end
-        # With equality reduction, the offset is another one
-        @test abs(fval_ldps[1] - fval_ldps[2]) > 1e-3
-    end
-
-    # The penalty of a violated soft constraint is part of both objectives
-    ss = copy(sqp); ss[nf+1] = DAQPBase.SOFT
-    bus = copy(buf); bus[nf+1] = 1.0
-    opts = Dict{Symbol,Any}(:eq_reduction => Cint(off))
-    x, fval, exitflag, info = solve_with(ss, opts; bu = bus)
-    @test exitflag == DAQPBase.SOFT_OPTIMAL
-    @test abs(info.fval_ldp - (fval + c)) < 1e-9 * (1 + c)
-    opts[:fval_bound] = info.fval_ldp * (1 + 1e-6)
-    @test solve_with(ss, opts; bu = bus)[3] == DAQPBase.SOFT_OPTIMAL
-    opts[:fval_bound] = info.fval_ldp * (1 - 1e-6)
-    @test solve_with(ss, opts; bu = bus)[3] == DAQPBase.INFEASIBLE
-
-    # With suboptimality tolerances, the objective of the returned solution
-    opts = Dict{Symbol,Any}(:eq_reduction => Cint(off), :abs_subopt => 0.37, :rel_subopt => 0.013)
-    x, fval, exitflag, info = solve_with(sbin, opts)
-    @test exitflag == DAQPBase.OPTIMAL
-    @test abs(fval - (0.5 * dot(x, Hf, x) + dot(ff, x))) < 1e-9 * (1 + abs(fval))
-    @test abs(info.fval_ldp - (fval + c)) < 1e-9 * (1 + c)
-end
-
 @testset "BnB incumbent and warm start" begin
     rng_inc = MersenneTwister(1234)
     Random.seed!(1234)
@@ -381,6 +312,60 @@ end
     end
 end
 
+@testset "BnB suboptimality w.r.t. reported objective" begin
+    # x = [b, z, y], b binary, z >= max(0, b-0.6)
+    # J = 0.5b^2 - 0.6b + 0.5δz^2 + z + 0.5y^2 + py => J(b=0) = -0.5p^2, J(b=1) ≈ 0.3-0.5p^2
+    # 0.5f'H⁻¹f ≈ 0.5/δ is much larger than |J|, which must not affect the tolerances
+    δ = 1e-4
+    A = [1.0 -1.0 0.0]
+    bu = [1.0, 1e30, 1e30, 0.6]
+    bl = [0.0, 0.0, -1e30, -1e30]
+    sense = Cint[DAQPBase.BINARY, 0, 0, 0]
+    for p in (0.0, 1.0), rel in (0.0, 1e-3, 0.5)
+        H = Diagonal([1.0, δ, 1.0])
+        f = [-0.6, 1.0, p]
+        s = settings(DAQPBase.Model(), Dict(:rel_subopt => rel))
+        x,fval,ef,_ = quadprog(Matrix(H),f,A,bu,bl,sense; settings=s)
+        @test ef == DAQPBase.OPTIMAL
+        @test abs(x[1]) < 1e-6
+        @test abs(fval+0.5p^2) < 1e-6
+    end
+    # fval_bound refers to the reported objective
+    H, f = [1.0 0 0; 0 δ 0; 0 0 1.0], [-0.6, 1.0, 1.0]
+    for (fb, ef_exp) in ((-0.4, DAQPBase.OPTIMAL), (-0.6, DAQPBase.INFEASIBLE))
+        s = settings(DAQPBase.Model(), Dict(:fval_bound => fb))
+        x,fval,ef,_ = quadprog(H,f,A,bu,bl,sense; settings=s)
+        @test ef == ef_exp
+        ef == DAQPBase.OPTIMAL && @test abs(fval+0.5) < 1e-6
+    end
+    # ... also when equality elimination removes a part of the objective (w = 3 adds 4.5)
+    He = Matrix(Diagonal([1.0, δ, 1.0, 1.0]))
+    fe = [-0.6, 1.0, 1.0, 0.0]
+    Ae = [1.0 -1.0 0.0 0.0; 0.0 0.0 0.0 1.0]
+    bue, ble = [1.0, 1e30, 1e30, 1e30, 0.6, 3.0], [0.0, 0.0, -1e30, -1e30, -1e30, 3.0]
+    sensee = Cint[DAQPBase.BINARY, 0, 0, 0, 0, DAQPBase.EQUALITY]
+    for eqr in (-1, 1), (fb, ef_exp) in ((4.01, DAQPBase.OPTIMAL), (3.99, DAQPBase.INFEASIBLE))
+        s = settings(DAQPBase.Model(), Dict(:fval_bound => fb, :eq_reduction => eqr))
+        x,fval,ef,_ = quadprog(He,fe,Ae,bue,ble,sensee; settings=s)
+        @test ef == ef_exp
+        ef == DAQPBase.OPTIMAL && @test abs(fval-4.0) < 1e-6
+    end
+
+    # Random MIQPs: the result is within the allowed suboptimality
+    Random.seed!(1234)
+    for _ in 1:20
+        H,f,A,bu,bl,sense = generate_test_MIQP(20,60,20,10)
+        _,fopt,ef,_ = quadprog(H,f,A,bu,bl,sense)
+        @test ef == DAQPBase.OPTIMAL
+        for (rel,abs_) in ((1e-2,0.0), (0.0,1.0), (1e-1,1.0))
+            s = settings(DAQPBase.Model(), Dict(:rel_subopt => rel, :abs_subopt => abs_))
+            _,fs,efs,_ = quadprog(H,f,A,bu,bl,sense; settings=s)
+            @test efs == DAQPBase.OPTIMAL
+            @test fopt-1e-6 <= fs <= fopt + abs_ + rel*abs(fs) + 1e-6*(1+abs(fopt))
+        end
+    end
+end
+
 @testset "BnB binary constraints relaxed and restored by updates" begin
     # The first nbu variables can be binary, sum(x[1:nbu]) <= 2.6 makes
     # branching necessary, and two equality constraints allow equality reduction
@@ -441,28 +426,6 @@ end
     @test ef3 == DAQPBase.OPTIMAL
     @test abs(f3-f1) < 1e-6*(1+abs(f1))
     @test info3.iterations == info1.iterations
-end
-
-@testset "BnB cutoff" begin
-    # f = 0, so that fval_bound refers to the objective 0.5x'Hx itself. At
-    # least two of the four binary variables are one, so the optimal value is 1
-    H = Matrix(1.0I, 4, 4); f = zeros(4); A = ones(1, 4)
-    sense = vcat(fill(Cint(DAQPBase.BINARY), 4), Cint[0])
-    bu = [1.0, 1, 1, 1, 1e30]; bl = [0.0, 0, 0, 0, 1.5]
-    for (bound, flag) in ((1e30, DAQPBase.OPTIMAL), (1.1, DAQPBase.OPTIMAL), (0.9, DAQPBase.CUTOFF))
-        s = settings(DAQPBase.Model(), Dict(:fval_bound => bound))
-        _, fval, exitflag, info = quadprog(H, f, A, bu, bl, sense; settings=s)
-        @test exitflag == flag
-        flag == DAQPBase.OPTIMAL && @test abs(fval - 1) < 1e-9
-        flag == DAQPBase.CUTOFF && @test info.status == :Cutoff
-    end
-    # Without an integer-feasible solution, the problem remains infeasible
-    bu[end] = 0.8; bl[end] = 0.2
-    for bound in (1e30, 10.0)
-        s = settings(DAQPBase.Model(), Dict(:fval_bound => bound))
-        _, _, exitflag, _ = quadprog(H, f, A, bu, bl, sense; settings=s)
-        @test exitflag == DAQPBase.INFEASIBLE
-    end
 end
 
 @testset "Model interface" begin
@@ -954,8 +917,8 @@ end
     x, fval, exitflag, info = quadprog(Ht, ft, At, but, blt, st; settings=s)
     # An integer-feasible solution has been found before the limit, and the
     # best one is returned
-    @test exitflag == DAQPBase.TIMELIMIT_FEASIBLE
-    @test info.status == :Time_Limit_Feasible
+    @test exitflag == DAQPBase.FEASIBLE
+    @test info.status == :Feasible
     @test info.nodes <= 32
     @test all(min.(abs.(x[1:nbt]), abs.(x[1:nbt] .- 1)) .< 1e-6)
     @test all(blt[1:nt] .- 1e-6 .<= x .<= but[1:nt] .+ 1e-6)
@@ -1241,67 +1204,6 @@ end
         @test eu == DAQPBase.OPTIMAL
         @test norm(xu - xref2) < 1e-8
         @test abs(fvu - fref2) < 1e-8
-    end
-end
-
-@testset "Equality elimination with a factored Hessian" begin
-    # With the Cholesky factor of the Hessian (problem_type 2), the reduction is
-    # formed from the factor, and it gives the solution of the reduction of the
-    # Hessian and of the solve without the reduction
-    Random.seed!(2026)
-    function eq_problem(n, neq, mineq; diagonal=false, ndep=0)
-        H = diagonal ? diagm(0.5 .+ rand(n)) : (L = randn(n, n); L'L / n + I)
-        Ae = randn(neq, n)
-        ndep > 0 && (Ae = [Ae; Ae[1:ndep, :] + Ae[2:ndep+1, :]]) # Dependent equalities
-        ne = size(Ae, 1)
-        A = [Ae; randn(mineq, n)]
-        x0 = randn(n)
-        bu = vcat(abs.(x0) .+ 1, A * x0 .+ [zeros(ne); rand(mineq)])
-        bl = vcat(-abs.(x0) .- 1, Ae * x0, fill(-1e30, mineq))
-        sense = vcat(zeros(Cint, n), fill(Cint(DAQPBase.EQUALITY), ne), zeros(Cint, mineq))
-        return H, randn(n), A, bu, bl, sense, ne
-    end
-    function solve_policy(H, f, A, bu, bl, sense, policy)
-        d = DAQPBase.Model()
-        DAQPBase.settings(d, Dict(:eq_reduction => policy))
-        DAQPBase.setup(d, H, f, A, bu, bl, sense)
-        reduced = unsafe_load(d.work).eq != C_NULL
-        x, fval, exitflag, _ = DAQPBase.solve(d)
-        return x, fval, exitflag, reduced, d
-    end
-    ON, OFF = DAQPBase.DAQP_EQ_REDUCTION_ON, DAQPBase.DAQP_EQ_REDUCTION_OFF
-    # Dense, dependent equalities, equalities that determine x, diagonal
-    for (n, neq, mineq, kw) in ((30, 12, 20, (;)), (30, 10, 20, (; ndep=3)),
-                                (20, 20, 10, (;)), (30, 12, 20, (; diagonal=true)))
-        H, f, A, bu, bl, sense, ne = eq_problem(n, neq, mineq; kw...)
-        C = cholesky(Symmetric(H))
-        xref, fref, eref, _ = solve_policy(H, f, A, bu, bl, sense, OFF)
-        xh, fh, eh, rh, _ = solve_policy(H, f, A, bu, bl, sense, ON)
-        xc, fc, ec, rc, dc = solve_policy(C, f, A, bu, bl, sense, ON)
-        @test eref == eh == ec == DAQPBase.OPTIMAL
-        @test rh && rc
-        @test norm(xc - xh, Inf) < 1e-9
-        @test norm(xc - xref, Inf) < 1e-8
-        @test abs(fc - fref) < 1e-8 * max(1, abs(fref))
-        # One-shot solve (AUTO)
-        xq, _, eq_flag, _ = DAQPBase.quadprog(C, f, A, bu, bl, sense)
-        @test eq_flag == DAQPBase.OPTIMAL
-        @test norm(xq - xref, Inf) < 1e-8
-
-        # An update of the bounds of the reduced workspace
-        x1 = randn(n)
-        bu2, bl2 = copy(bu), copy(bl)
-        bu2[n+1:n+ne] .= bl2[n+1:n+ne] .= A[1:ne, :] * x1
-        bu2[1:n] .= max.(bu2[1:n], abs.(x1) .+ 1)
-        bl2[1:n] .= .-bu2[1:n]
-        bu2[n+ne+1:end] .= max.(bu2[n+ne+1:end], A[ne+1:end, :] * x1 .+ 0.1)
-        DAQPBase.update(dc, nothing, nothing, nothing, bu2, bl2, nothing, nothing, Cint(0))
-        @test unsafe_load(dc.work).eq != C_NULL
-        xu, fu, eu, _ = DAQPBase.solve(dc)
-        xr, fr, er, _ = solve_policy(H, f, A, bu2, bl2, sense, OFF)
-        @test eu == er == DAQPBase.OPTIMAL
-        @test norm(xu - xr, Inf) < 1e-8
-        @test abs(fu - fr) < 1e-8 * max(1, abs(fr))
     end
 end
 

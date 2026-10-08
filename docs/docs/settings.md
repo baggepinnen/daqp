@@ -25,14 +25,14 @@ Table of contents
 | `progress_tol` | Minimum change in objective function to consider it progress | 1e-6|
 | `cycle_tol` | Allowed number of iterations without progress before terminating| 10 |
 | `iter_limit` | Maximum number of iterations before terminating| 10000 |
-| `fval_bound` | Maximum allowed objective function value. The solver terminates if the dual objective exceeds this value (since it is a lower bound of the optimal value). The value refers to the objective of the least-distance problem that DAQP solves internally, which the Julia interface returns as `info.fval_ldp`. | 1e30|
+| `fval_bound` | Maximum allowed objective function value. The solver terminates if the dual objective exceeds this value (since it is a lower bound of the optimal value). | 1e30|
 | `eps_prox` | Proximal regularization. A negative value enables automatic regularization for singular problems. A positive forces proximal regularization. | -1e-6|
 | `eq_reduction` | Equality-reduction policy: `-1` disables reduction, `0` selects it automatically, and `1` forces it when eligible. The equality constraints are then eliminated from the problem before it is solved. | 0 |
 | `eta_prox` | Tolerance that determines if a fixed point has been reached during proximal-point iterations. A negative value selects an automatic tolerance: 1e-6 for the default `dual_tol`, otherwise the smaller of 1e-6 and `0.1*dual_tol`. A nonnegative value is used directly. | -1|
 | `rho_soft` | Weight used for [soft constraints]({{ '/start/advanced/soft' | relative_url }}) (higher enables more violations) | 1e-6|
 | `w_soft` | Linear weight used for [soft constraints]({{ '/start/advanced/soft' | relative_url }}) (higher make the resulting penalty function more exact) | 0 |
-| `rel_subopt` | Allowed relative suboptimality in branch and bound | 0 |
-| `abs_subopt` | Allowed absolute suboptimality in branch and bound | 0 |
+| `rel_subopt` | Allowed relative suboptimality in branch and bound: nodes that cannot improve on the objective value `J` of the incumbent by more than `abs_subopt + rel_subopt*abs(J)` are pruned | 0 |
+| `abs_subopt` | Allowed absolute suboptimality in branch and bound (see `rel_subopt`) | 0 |
 | `sing_tol` | Tolerance for checking if the LDL' factorization is singular| 3.7e-11 |
 | `refactor_tol` | Tolerance for refactoring the LDL' factorization before terminating | 1e-9 |
 | `time_limit` | Maximum wall-clock time in seconds before terminating (0 means no limit). If branch and bound reaches it after an integer-feasible solution has been found, the best such solution is returned (exit flag 5). | 0 |
@@ -42,7 +42,7 @@ Table of contents
 
 |Value|Status |
 |:-:|:-------|
-|5|Time limit reached, best integer-feasible solution returned (branch and bound)|
+|5|Feasible (e.g., BnB terminated early)|
 |4|Optimal (inexact)|
 |2|Soft optimal|
 |1|Optimal |
@@ -54,7 +54,6 @@ Table of contents
 |-6|Initial working set overdetermined|
 |-7|Time limit reached|
 |-8|Unsupported problem|
-|-9|No integer-feasible solution with an objective below `fval_bound` (branch and bound)|
 
 ## Constraint classification
 The type of a constraint is classified through an integer value (called sense), where the bits in this integer encode different properties: 

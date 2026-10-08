@@ -139,8 +139,15 @@ static c_float daqp_bnb_incumbent(DAQPWorkspace* work){
     return fval;
 }
 
+// Nodes must improve on the objective J by more than abs_subopt + rel_subopt*|J|.
+// The bound is in the scale 0.5*fval = J + c used by daqp_ldp
+static c_float daqp_bnb_bound(c_float fval, c_float c, DAQPSettings* settings){
+    c_float J = 0.5*fval - c;
+    return 0.5*fval - settings->abs_subopt - settings->rel_subopt*(J < 0 ? -J : J);
+}
+
 int daqp_bnb(DAQPWorkspace* work){
-    int branch_id, exitflag, cutoff = 0;
+    int branch_id, exitflag;
     DAQPNode* node;
     c_float *swp_ptr = NULL;
 
@@ -153,19 +160,21 @@ int daqp_bnb(DAQPWorkspace* work){
     if(work->n_active == work->bnb->neq)
         daqp_bnb_load_ws(work->bnb->root_WS,work->bnb->n_root_WS,work);
 
-    // Modify upper bound based on absolute/relative suboptimality tolerance
-    c_float fval_bound0 = work->settings->fval_bound;
-    c_float eps_r = 1/(1+work->settings->rel_subopt);
-    work->settings->fval_bound = (fval_bound0 - work->settings->abs_subopt)*eps_r;
-    c_float fval_best = 0; // Internal objective (twice) of the best feasible solution
+    // Objective J = 0.5*fval - c, with c = 0.5*||v||^2 - fp, where fp is the objective
+    // removed by equality elimination (only needed for rel_subopt and fval_bound)
+    c_float fval_bound0 = work->settings->fval_bound, fval_best = 0, c = 0;
+    if(work->settings->rel_subopt > 0 || fval_bound0 < DAQP_INF){
+        if(work->v != NULL) for(int i=0; i < work->n; i++) c += 0.5*work->v[i]*work->v[i];
+        if(work->eq != NULL && work->eq->installed) c -= work->eq->fp;
+    }
+    work->settings->fval_bound = fval_bound0 + c;
 
     // Start from a user-provided integer-feasible solution
     if(work->state & DAQP_STATE_INCUMBENT){
         work->state &= ~DAQP_STATE_INCUMBENT;
-        c_float fval_inc = 0.5*daqp_bnb_incumbent(work);
-        if(fval_inc >= 0 && fval_inc < fval_bound0){
-            work->settings->fval_bound = (fval_inc - work->settings->abs_subopt)*eps_r;
-            fval_best = 2*fval_inc;
+        fval_best = daqp_bnb_incumbent(work);
+        if(fval_best >= 0 && 0.5*fval_best < work->settings->fval_bound){
+            work->settings->fval_bound = daqp_bnb_bound(fval_best,c,work->settings);
             swp_ptr = work->xold; // Marks that a feasible solution is stored in xold
         }
     }
@@ -201,18 +210,14 @@ int daqp_bnb(DAQPWorkspace* work){
         }
 #endif
         // Cut conditions
-        if(exitflag==DAQP_EXIT_INFEASIBLE){ // Dominance cut
-            // The node was pruned by the objective bound (not proven infeasible)
-            if(work->fval > 2*work->settings->fval_bound) cutoff = 1;
-            continue;
-        }
+        if(exitflag==DAQP_EXIT_INFEASIBLE) continue; // Dominance cut
         if(exitflag<0) break; // Inner solver failed => exit loop
 
         // Find index to branch over
         branch_id = daqp_get_branch_id(work);
         if(branch_id==DAQP_EMPTY_IND){// Nothing to branch over => integer feasible
-            work->settings->fval_bound = (0.5*work->fval - work->settings->abs_subopt)*eps_r;
             fval_best = work->fval;
+            work->settings->fval_bound = daqp_bnb_bound(fval_best,c,work->settings);
             swp_ptr=work->xold; work->xold= work->u; work->u=swp_ptr; // Store feasible sol
         }
         else{
@@ -228,20 +233,15 @@ int daqp_bnb(DAQPWorkspace* work){
     work->bnb->n_clean = work->bnb->neq;
     if(swp_ptr==NULL){
         work->settings->fval_bound = fval_bound0;
-        if(exitflag < DAQP_EXIT_INFEASIBLE) return exitflag;
-        // Without an incumbent, only the user-provided fval_bound can prune a node
-        return cutoff ? DAQP_EXIT_CUTOFF : DAQP_EXIT_INFEASIBLE;
+        return exitflag < 0 ? exitflag : DAQP_EXIT_INFEASIBLE;
     }
     else{
-        // Objective of the best feasible solution (recovering it from
-        // fval_bound would introduce rounding errors)
         work->fval = fval_best;
         work->settings->fval_bound = fval_bound0;
         // Let work->u point to the best feasible solution
         swp_ptr=work->u; work->u= work->xold; work->xold=swp_ptr;
-        // At the time limit, the best feasible solution found is returned
-        if(exitflag == DAQP_EXIT_TIMELIMIT) return DAQP_EXIT_TIMELIMIT_FEASIBLE;
-        return exitflag < DAQP_EXIT_INFEASIBLE ? exitflag : DAQP_EXIT_OPTIMAL;
+        // Exploration ended early (time/iteration limit, cycling) => not proven optimal
+        return exitflag < DAQP_EXIT_INFEASIBLE ? DAQP_EXIT_FEASIBLE : DAQP_EXIT_OPTIMAL;
     }
 }
 

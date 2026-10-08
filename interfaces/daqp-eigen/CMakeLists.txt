@@ -39,9 +39,8 @@ if(TEST)
     add_executable(19_fully_determined_eq tests/19_fully_determined_eq.cpp)
     add_executable(20_degenerate_cycling tests/20_degenerate_cycling.cpp)
     add_executable(21_bnb_time_limit tests/21_bnb_time_limit.cpp)
-    add_executable(22_bnb_cutoff tests/22_bnb_cutoff.cpp)
-    add_executable(23_bnb_update_binaries tests/23_bnb_update_binaries.cpp)
-    add_executable(24_eq_reduction_factored tests/24_eq_reduction_factored.cpp)
+    add_executable(22_bnb_update_binaries tests/22_bnb_update_binaries.cpp)
+    add_executable(23_eq_reduction_factored tests/23_eq_reduction_factored.cpp)
 
     set(TARGETS
         00_basic_qp
@@ -66,9 +65,8 @@ if(TEST)
         19_fully_determined_eq
         20_degenerate_cycling
         21_bnb_time_limit
-        22_bnb_cutoff
-        23_bnb_update_binaries
-        24_eq_reduction_factored
+        22_bnb_update_binaries
+        23_eq_reduction_factored
     )
 
     foreach(TARGET ${TARGETS})
